@@ -1,0 +1,34 @@
+services:
+  mashloop:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Bật dòng dưới nếu build cho server Linux có GPU NVIDIA CUDA 12.4:
+      # args:
+      #   TORCH_INDEX: https://download.pytorch.org/whl/cu124
+    container_name: mashloop
+    ports:
+      - "8765:8765"
+    volumes:
+      # Mount thư mục data trên máy host để giữ lại bài hát và phân tích giữa các lần chạy
+      - ./data:/app/data
+    environment:
+      - MASHLOOP_HOST=0.0.0.0
+      - MASHLOOP_PORT=8765
+      # - MASHLOOP_MULTIUSER=1  # Bỏ comment nếu muốn chạy ở chế độ nhiều người dùng
+    networks:
+      - pingvin-net
+    restart: unless-stopped
+
+    # Bỏ comment cụm dưới nếu chạy trên Linux có card NVIDIA và đã cài nvidia-container-toolkit:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+networks:
+  pingvin-net:
+    external: true
