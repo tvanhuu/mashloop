@@ -210,7 +210,7 @@ Truy cập: **`http://localhost:8765`**.
 
 > [!TIP]
 > - Cờ `--network pingvin-net` giúp container cùng chung mạng với `cloudflared-tunnel`, cho phép Cloudflare Tunnel trỏ trực tiếp đến URL: `http://mashloop:8765`.
-> - Việc mount `-v /Users/itsw/work/mashloop/data:/app/data` đảm bảo các bài hát đã tải, kết quả phân tích và model AI weights không bị mất khi container restart hoặc được tạo mới.
+> - Việc mount `-v /Users/itsw/work/mashloop/data:/app/data` đảm bảo các bài hát đã tải, kết quả phân tích và model AI weights không bị mất khi container restart hoặc được tạo mới. Image đặt `TORCH_HOME=/app/data/torch`, nên model Beat This! và Demucs nằm ở `data/torch/hub/checkpoints/` trên máy host và chỉ tải một lần.
 
 ### Hỗ trợ GPU NVIDIA (CUDA)
 
@@ -240,6 +240,7 @@ Các biến môi trường có thể được định cấu hình trong file `do
 | `MASHLOOP_MAX_SESSION_TRACKS` | `60` | Số bài hát tối đa trong một thư viện phiên |
 | `MASHLOOP_MAX_DURATION_S` | `900` (15 phút) | Độ dài tối đa của một bài hát cho phép phân tích |
 | `MASHLOOP_JS_RUNTIME` | `node` | Runtime JavaScript cho yt-dlp (`node` hoặc `deno`) |
+| `TORCH_HOME` | `~/.cache/torch` (`/app/data/torch` trong Docker) | Nơi torch hub lưu model Beat This! và Demucs |
 
 ---
 
@@ -261,5 +262,5 @@ Các biến môi trường có thể được định cấu hình trong file `do
   ```
 
 ### 3. Lần đầu thêm bài hát phân tích rất lâu
-- **Nguyên nhân:** Lần đầu tiên chạy, hệ thống cần tải mô hình AI `Beat This!` và `htdemucs` (~160MB - 300MB) về thư mục cache.
+- **Nguyên nhân:** Lần đầu tiên chạy, hệ thống cần tải mô hình AI `Beat This!` và `htdemucs` (~160MB - 300MB) về thư mục cache của torch (`~/.cache/torch/hub` khi chạy trực tiếp, `data/torch/hub` khi chạy bằng Docker). Model chỉ tải một lần.
 - **Cách khắc phục:** Từ bài thứ 2 trở đi, tốc độ phân tích sẽ nhanh hơn đáng kể. Các bài hát đã phân tích một lần sẽ được lưu trữ vĩnh viễn trong `data/library/` và không bao giờ phải phân tích lại.

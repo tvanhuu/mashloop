@@ -9,6 +9,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MASHLOOP_DATA=/app/data \
     MASHLOOP_JS_RUNTIME=node
 
+# Model Beat This! và Demucs được torch hub tải về $TORCH_HOME/hub. Đặt trong
+# volume data để container tạo mới (down/up, up --build) không phải tải lại.
+ENV TORCH_HOME=/app/data/torch
+
 WORKDIR /app
 
 # Cài đặt các gói hệ thống bắt buộc:
