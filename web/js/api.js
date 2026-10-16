@@ -2,11 +2,13 @@ import { Track } from "./graph.js";
 
 // The library this page works on. Hosted, the server opens a fresh one for
 // every visit (nothing is kept in the browser, so a reload starts empty); in
-// the personal app the session is simply "local".
-export const session = { id: null, multiuser: false, limits: {}, key: null };
+// the personal app the session is simply "local", and `playlist` (when set)
+// narrows every call to one playlist of the store.
+export const session = { id: null, multiuser: false, playlists: false, limits: {}, key: null, playlist: null };
 let opening = null;
-// Called after the server lost the session (it restarted): put the songs back.
-export const hooks = { restore: async () => {} };
+// restore: the server lost the session (it restarted), put the songs back.
+// playlistGone: the open playlist no longer exists (deleted in another tab).
+export const hooks = { restore: async () => {}, playlistGone: () => {} };
 
 async function open() {
   if (!opening) {
@@ -16,7 +18,7 @@ async function open() {
         return r.json();
       })
       .then((s) => Object.assign(session, {
-        id: s.sid, multiuser: s.multiuser, limits: s.limits || {},
+        id: s.sid, multiuser: s.multiuser, playlists: !!s.playlists, limits: s.limits || {},
         key: s.k ? Uint8Array.from(atob(s.k), (c) => c.charCodeAt(0)) : null,
       }))
       .finally(() => (opening = null));
@@ -62,14 +64,30 @@ async function fail(r) {
   throw new Error(msg);
 }
 
+// The headers every call carries. `store`: the whole store, not the open playlist.
+function headers(extra = {}, store = false) {
+  const h = { ...extra, "X-Session": session.id };
+  if (session.playlist && !store) h["X-Playlist"] = session.playlist;
+  return h;
+}
+
 async function json(url, opts = {}, retry = true) {
   await ready();
-  const r = await fetch(url, { ...opts, headers: { ...(opts.headers || {}), "X-Session": session.id } });
+  const { store, ...init } = opts;
+  const r = await fetch(url, { ...init, headers: headers(init.headers, store) });
   if (r.status === 410 && retry) {
     session.id = null;
     await open();
     await hooks.restore();
     return json(url, opts, false);
+  }
+  if (r.status === 404 && session.playlist && !store) {
+    const detail = await r.clone().json().then((b) => b.detail, () => null);
+    if (detail === "unknown playlist") {
+      session.playlist = null;
+      hooks.playlistGone();
+      return json(url, opts, retry);
+    }
   }
   if (!r.ok) await fail(r);
   return r.json();
@@ -79,6 +97,11 @@ const send = (method, body) => ({ method, headers: { "Content-Type": "applicatio
 
 export const api = {
   tracks: () => json("/api/tracks"),
+  storeTracks: () => json("/api/tracks", { store: true }),
+  playlists: () => json("/api/playlists", { store: true }),
+  createPlaylist: (name, ids = []) => json("/api/playlists", { ...send("POST", { name, ids }), store: true }),
+  renamePlaylist: (pid, name) => json(`/api/playlists/${pid}`, { ...send("PATCH", { name }), store: true }),
+  deletePlaylist: (pid) => json(`/api/playlists/${pid}`, { method: "DELETE", store: true }),
   search: (q) => json(`/api/search?q=${encodeURIComponent(q)}`),
   add: (text) => json("/api/tracks", send("POST", { text })),
   restore: (ids) => json("/api/tracks", send("POST", { ids }), false),
@@ -91,7 +114,8 @@ export const api = {
   samples: () => json("/api/samples"),
   async audio(id, retry = true) {
     await ready();
-    const r = await fetch(`/api/tracks/${id}/audio`, { headers: { "X-Session": session.id } });
+    // Audio is the store's (a playlist does not change it), so no playlist header.
+    const r = await fetch(`/api/tracks/${id}/audio`, { headers: headers({}, true) });
     if (r.status === 410 && retry) {
       session.id = null;
       await open();
@@ -108,7 +132,7 @@ export const api = {
     return new Promise((resolve, reject) => {
       const x = new XMLHttpRequest();
       x.open("POST", "/api/upload");
-      x.setRequestHeader("X-Session", session.id);
+      for (const [k, v] of Object.entries(headers())) x.setRequestHeader(k, v);
       x.setRequestHeader("X-Filename", encodeURIComponent(file.name));
       x.setRequestHeader("Content-Type", "application/octet-stream");
       x.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
@@ -176,9 +200,10 @@ export class Loader extends EventTarget {
     return entry.promise;
   }
 
-  // New pairs were linked in this library: every loaded song re-reads its exits.
-  refreshAll() {
-    for (const e of this.cache.values()) if (e.track) this.refreshTransitions(e.track);
+  // New pairs were linked in this library, or another playlist was opened:
+  // every loaded song re-reads its exits (but `skip`, which keeps its own).
+  refreshAll(skip = null) {
+    for (const e of this.cache.values()) if (e.track && e.track.id !== skip) this.refreshTransitions(e.track);
   }
 
   async refreshTransitions(track) {

@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import download, ingest, library, ratelimit, sessions, worker
+from . import download, ingest, library, playlists, ratelimit, sessions, worker
 from .config import DATA_DIR, HOST, MAX_PLAYLIST, MAX_SESSION_TRACKS, MAX_UPLOAD_MB, MULTIUSER, PORT, WEB_DIR
 
 # Songs waiting to be fetched and analysed, all listeners together: past this
@@ -41,7 +41,21 @@ class PatchRequest(BaseModel):
     enabled: bool | None = None
 
 
-def view_of(x_session: str | None = Header(default=None)) -> sessions.View:
+class PlaylistRequest(BaseModel):
+    name: str | None = None
+    ids: list[str] | None = None
+
+
+def view_of(x_session: str | None = Header(default=None),
+            x_playlist: str | None = Header(default=None)) -> sessions.View:
+    """The library a request works on. In the personal app, X-Playlist narrows
+    it to one playlist; an unknown playlist is 404, not 410 (410 makes the
+    page open a new session)."""
+    if x_playlist and not MULTIUSER:
+        try:
+            return sessions.playlist(x_playlist)
+        except sessions.UnknownPlaylist:
+            raise HTTPException(404, "unknown playlist")
     v = sessions.get(x_session)
     if v is None:
         raise HTTPException(410, "session expired")
@@ -129,7 +143,7 @@ def new_session(request: Request):
     ratelimit.check(_ip(request), "session")
     v = sessions.create()
     return {"sid": v.id, "multiuser": MULTIUSER, "k": base64.b64encode(v.key).decode() if v.key else None,
-            "limits": {"tracks": MAX_SESSION_TRACKS if MULTIUSER else None, "playlist": MAX_PLAYLIST,
+            "playlists": not MULTIUSER, "limits": {"tracks": MAX_SESSION_TRACKS if MULTIUSER else None, "playlist": MAX_PLAYLIST,
                        "upload_mb": MAX_UPLOAD_MB}}
 
 
@@ -277,6 +291,46 @@ def samples():
     s = library.samples()
     ready = [tid for tid in s["ids"] if (library.read_meta(tid) or {}).get("status") == "ready"]
     return {"name": s["name"], "ids": ready}
+
+
+def _personal() -> None:
+    if MULTIUSER:
+        raise HTTPException(404, "not found")
+
+
+def _playlist_public(p: dict) -> dict:
+    return {"id": p["id"], "name": p["name"], "count": len(playlists.track_ids(p["id"]))}
+
+
+@app.get("/api/playlists")
+def playlist_list():
+    _personal()
+    return {"playlists": [_playlist_public(p) for p in playlists.list_all()],
+            "all": len(library.list_tracks())}
+
+
+@app.post("/api/playlists")
+def playlist_create(req: PlaylistRequest):
+    _personal()
+    return _playlist_public(playlists.create(req.name or "", req.ids))
+
+
+@app.patch("/api/playlists/{pid}")
+def playlist_rename(pid: str, req: PlaylistRequest):
+    _personal()
+    p = playlists.rename(pid, req.name or "") if playlists.valid_id(pid) else None
+    if p is None:
+        raise HTTPException(404, "unknown playlist")
+    return _playlist_public(p)
+
+
+@app.delete("/api/playlists/{pid}")
+def playlist_delete(pid: str):
+    """Only the list goes: its songs stay in the store."""
+    _personal()
+    if not (playlists.valid_id(pid) and playlists.delete(pid)):
+        raise HTTPException(404, "unknown playlist")
+    return {"deleted": pid}
 
 
 @app.patch("/api/tracks/{tid}")

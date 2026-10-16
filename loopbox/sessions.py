@@ -6,12 +6,13 @@ import secrets
 import threading
 import time
 
-from . import library, worker
+from . import library, playlists, worker
 from .config import MAX_SESSION_TRACKS, MULTIUSER, SESSION_TTL_S
 
 _lock = threading.RLock()
 _sessions: dict[str, "SessionView"] = {}
 _local = None
+_playlist_views: dict[str, "PlaylistView"] = {}
 
 
 class LimitError(Exception):
@@ -135,9 +136,70 @@ class LocalView(View):
 
     def remove(self, tid):
         library.delete(tid)
+        playlists.drop_track(tid)
 
     def set_enabled(self, tid, on):
         library.update(tid, enabled=on)
+
+
+class PlaylistView(View):
+    """The personal app, one playlist open: a set of songs from the store, kept
+    on disk (playlists.py). Taking a song out leaves it in the store. The pairs
+    are already computed for the whole store, so its transitions only need
+    assembling over its own songs."""
+
+    key = None
+
+    def __init__(self, pid: str):
+        super().__init__()
+        self.pid = pid
+        self.id = f"pl:{pid}"
+
+    def room(self):
+        return 1 << 30
+
+    def track_ids(self):
+        return playlists.track_ids(self.pid)
+
+    def is_enabled(self, tid, meta):
+        return tid not in ((playlists.get(self.pid) or {}).get("off") or [])
+
+    def metas(self):
+        off = set((playlists.get(self.pid) or {}).get("off") or [])
+        out = []
+        for tid in self.track_ids():
+            m = library.read_meta(tid)
+            if m:
+                out.append({**m, "enabled": tid not in off})
+        return out
+
+    def add(self, tid):
+        playlists.add(self.pid, tid)
+        library.touch(tid)
+
+    def remove(self, tid):
+        playlists.remove(self.pid, tid)
+
+    def set_enabled(self, tid, on):
+        playlists.set_enabled(self.pid, tid, on)
+
+
+class UnknownPlaylist(Exception):
+    pass
+
+
+def playlist(pid: str) -> PlaylistView:
+    """The view of a playlist (one per playlist, so its assembled transitions
+    are cached). Raises UnknownPlaylist when it does not exist."""
+    if playlists.get(pid) is None:
+        with _lock:
+            _playlist_views.pop(pid, None)
+        raise UnknownPlaylist(pid)
+    with _lock:
+        v = _playlist_views.get(pid)
+        if v is None:
+            v = _playlist_views[pid] = PlaylistView(pid)
+        return v
 
 
 def create() -> View:
@@ -175,7 +237,8 @@ def local() -> LocalView:
 
 def views() -> list[View]:
     if not MULTIUSER:
-        return [local()]
+        with _lock:
+            return [local(), *_playlist_views.values()]
     with _lock:
         return list(_sessions.values())
 

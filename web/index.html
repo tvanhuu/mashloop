@@ -97,6 +97,16 @@
       </div>
 
       <div id="tab-library" class="tab on" role="tabpanel">
+        <section id="playlists" class="playlists" aria-labelledby="pl-label" hidden>
+          <h2 class="label" id="pl-label">Playlist</h2>
+          <div id="pl-chips" class="chips"></div>
+          <div id="pl-acts" class="pl-acts" hidden>
+            <button type="button" data-act="pick">Thêm từ thư viện</button>
+            <button type="button" data-act="rename">Đổi tên</button>
+            <button type="button" data-act="drop" class="danger">Xoá playlist</button>
+          </div>
+          <div id="pl-picker" class="results" aria-live="polite"></div>
+        </section>
         <form id="add-form" class="add" autocomplete="off">
           <label class="label" for="add-input">Thêm bài vào thư viện</label>
           <div class="add__field">
@@ -113,7 +123,7 @@
         </form>
         <div id="search-results" class="results" aria-live="polite"></div>
         <p id="worker" class="worker" aria-live="polite"></p>
-        <div class="shelf-head"><h2 class="label">Các vòng trong thư viện</h2><span id="lib-count" class="mono"></span></div>
+        <div class="shelf-head"><h2 class="label" id="shelf-title">Các vòng trong thư viện</h2><span id="lib-count" class="mono"></span></div>
         <ul id="track-list" class="tracks"></ul>
       </div>
 

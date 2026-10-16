@@ -30,6 +30,15 @@ hooks.restore = async () => {
   const ids = metas.map((m) => m.id);
   if (ids.length) await api.restore(ids).catch(() => {});
 };
+// Playlists of the personal app (none hosted). `all` counts the whole store.
+const pls = { lists: [], all: 0 };
+// The library row whose delete waits for a yes (personal app, "Tất cả bài").
+let confirming = null;
+hooks.playlistGone = () => {
+  ui.playlist = null;
+  save();
+  loadPlaylists();
+};
 const byId = () => new Map(metas.map((m) => [m.id, m]));
 const songOf = (m) => splitTitle(m?.title || "", m?.channel || "");
 const titleOf = (id) => {
@@ -76,7 +85,7 @@ const STORE = "loopbox.settings.v1";
 // 2: the abrupt effects (brake, roll) became opt-in; older saved settings that
 // had them on from the first release of effects are switched off once.
 const SETTINGS_VERSION = 2;
-const ui = { freq: 0.45, strict: 0.5, volume: 0.85, theme: "mood" };
+const ui = { freq: 0.45, strict: 0.5, volume: 0.85, theme: "mood", playlist: null };
 try {
   const saved = JSON.parse(localStorage.getItem(STORE) || "null");
   if (saved) {
@@ -91,6 +100,7 @@ try {
 } catch (_) {
   /* storage unavailable */
 }
+session.playlist = ui.playlist || null;
 
 function save() {
   try {
@@ -379,10 +389,17 @@ function trackRow(m) {
     ? `<button type="button" data-act="play" aria-label="Phát ${title}" title="Phát từ bài này">${ICON.play}</button>
        <button type="button" data-act="toggle" aria-label="${m.enabled === false ? "Đưa vào chuỗi" : "Bỏ khỏi chuỗi"}" title="${m.enabled === false ? "Đưa vào chuỗi" : "Bỏ khỏi chuỗi"}">${m.enabled === false ? ICON.in : ICON.out}</button>`
     : m.status === "error" ? `<button type="button" data-act="retry" aria-label="Thử lại" title="Thử lại">${ICON.retry}</button>` : "";
-  return `<li class="track ${playing ? "playing" : ""} ${m.enabled === false ? "off" : ""}" data-id="${esc(m.id)}">
+  const del = session.playlist ? ["Bỏ khỏi playlist", `Bỏ ${title} khỏi playlist`] : ["Xoá", `Xoá ${title}`];
+  const ask = confirming === m.id && !session.playlist
+    ? `<div class="track__confirm" role="group" aria-label="Xác nhận xoá ${title}">
+        <p>Xoá bài này khỏi thư viện? File nhạc và phân tích trên máy cũng bị xoá${pls.lists.length ? ", bài bị bỏ khỏi mọi playlist" : ""}.</p>
+        <div class="track__confirm-acts"><button type="button" class="danger" data-act="delete-yes">Xoá</button><button type="button" class="quiet" data-act="delete-no">Huỷ</button></div>
+      </div>`
+    : "";
+  return `<li class="track ${playing ? "playing" : ""} ${m.enabled === false ? "off" : ""} ${ask ? "confirming" : ""}" data-id="${esc(m.id)}">
     ${lead}
     <div><div class="t" title="${full}">${title}</div>${status}</div>
-    <div class="acts">${acts}<button type="button" data-act="delete" aria-label="Xoá ${title}" title="Xoá">${ICON.del}</button></div>
+    <div class="acts">${acts}<button type="button" data-act="delete" aria-label="${del[1]}" title="${del[0]}" aria-expanded="${!!ask}">${ICON.del}</button></div>${ask}
   </li>`;
 }
 
@@ -393,6 +410,8 @@ function renderLibrary() {
     : "";
   const html = metas.length
     ? metas.slice().reverse().map(trackRow).join("")
+    : session.playlist
+      ? `<li class="empty">${ICON.inf}Playlist này chưa có bài nào.<br>Thêm bài ở ô phía trên, hoặc chọn những bài đã có trong thư viện.<button type="button" class="ghost sample-btn" data-act="pick">Thêm từ thư viện</button></li>`
     : session.multiuser
       ? `<li class="empty">${ICON.inf}Thư viện của bạn đang trống.<br>Dán link YouTube, SoundCloud, Zing MP3, gõ tên bài, hoặc thả file nhạc (cả file zip) vào đây.<br>Chưa biết thêm gì? Nghe thử một thư viện có sẵn:${sampleBtn}</li>`
       : `<li class="empty">${ICON.inf}Thư viện còn trống.<br>Gõ tên một bài ở ô phía trên để thêm vòng đầu tiên.${sampleBtn}</li>`;
@@ -442,6 +461,7 @@ $("#track-list").addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-act]");
   if (!btn) return;
   if (btn.dataset.act === "samples") return loadSamples(btn);
+  if (btn.dataset.act === "pick") return openPicker();
   const id = btn.closest(".track").dataset.id;
   const m = byId().get(id);
   switch (btn.dataset.act) {
@@ -455,15 +475,43 @@ $("#track-list").addEventListener("click", async (e) => {
       await api.reanalyze(id);
       break;
     case "delete":
-      if (!session.multiuser && !confirm(`Xoá "${m.title}" khỏi thư viện?`)) return;
+      // In a playlist the song only leaves the list: it stays in the store,
+      // and if it is playing it carries on and hands over to the playlist.
+      if (session.playlist) {
+        await api.remove(id);
+        break;
+      }
+      // Personal, deleting removes the files: the row asks first. Hosted the
+      // song only leaves this visit's library, so no question.
+      if (!session.multiuser) return askDelete(confirming === id ? null : id);
+    // falls through
+    case "delete-yes":
+      confirming = null;
       if (player.cur?.track.id === id) player.stop();
       loader.drop(id);
       forget(id);
       await api.remove(id);
       break;
+    case "delete-no":
+      return askDelete(null);
   }
   refresh();
 });
+
+$("#track-list").addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && confirming) askDelete(null);
+});
+
+// Asks on the row itself before deleting a song from the store (`confirming`
+// is the row waiting for a yes).
+function askDelete(id) {
+  const back = confirming;
+  confirming = id;
+  renderLibrary();
+  const row = (t) => $(`#track-list .track[data-id="${t}"]`);
+  if (id) row(id)?.querySelector('[data-act="delete-no"]')?.focus();
+  else if (back) row(back)?.querySelector('[data-act="delete"]')?.focus();
+}
 
 async function refresh() {
   try {
@@ -482,6 +530,10 @@ async function refresh() {
     // results would not match the files on disk. Servers older than this check
     // do not send the flag at all.
     serverStale = !("stale_server" in r) || r.stale_server;
+    const open = pls.lists.find((p) => p.id === session.playlist);
+    if (open) open.count = metas.length;
+    else if (!session.playlist) pls.all = metas.length;
+    renderPlaylists();
     renderLibrary();
   } catch (_) {
     $("#worker").textContent = "Mất kết nối tới server";
@@ -497,6 +549,216 @@ function schedulePoll() {
     schedulePoll();
   }, working ? 1200 : 5000);
 }
+
+// ---------------------------------------------------------------- playlists
+
+// Personal app only. "Tất cả bài" is the store itself; a playlist is a set of
+// its songs, and while one is open the whole page works on it: the list, what
+// is added, and the chain (the server assembles its exits over the playlist).
+const HINT = $("#add-hint").textContent;
+const openPlaylist = () => pls.lists.find((p) => p.id === session.playlist) || null;
+
+async function loadPlaylists() {
+  if (!session.playlists) return;
+  try {
+    const r = await api.playlists();
+    pls.lists = r.playlists;
+    pls.all = r.all;
+  } catch (_) {
+    return;
+  }
+  if (session.playlist && !openPlaylist()) await switchPlaylist(null);
+  renderPlaylists();
+}
+
+let lastChipsHtml = "";
+function renderPlaylists() {
+  const box = $("#playlists");
+  box.hidden = !session.playlists;
+  if (box.hidden) return;
+  const pl = openPlaylist();
+  const chip = (id, name, n) => `<button type="button" class="chip ${(id || null) === session.playlist ? "on" : ""}" data-pl="${esc(id)}" aria-pressed="${(id || null) === session.playlist}" title="${esc(name)}"><span>${esc(name)}</span><span class="n">${n}</span></button>`;
+  const html = chip("", "Tất cả bài", pls.all) + pls.lists.map((p) => chip(p.id, p.name, p.count)).join("") +
+    `<button type="button" class="chip new" data-act="new">+ Playlist mới</button>`;
+  if (html !== lastChipsHtml) {
+    lastChipsHtml = html;
+    $("#pl-chips").innerHTML = html;
+  }
+  $("#pl-acts").hidden = !pl;
+  $('label[for="add-input"]').textContent = pl ? `Thêm bài vào ${pl.name}` : "Thêm bài vào thư viện";
+  $("#shelf-title").textContent = pl ? `Các vòng trong ${pl.name}` : "Các vòng trong thư viện";
+  $("#add-hint").textContent = pl
+    ? `Bài mới được tải về, phân tích, rồi vào ${pl.name}. Bài đã có trong thư viện thì vào ngay.`
+    : HINT;
+}
+
+async function switchPlaylist(pid) {
+  if (pid === session.playlist) return;
+  session.playlist = pid;
+  ui.playlist = pid;
+  save();
+  confirming = null;
+  closePicker();
+  $("#search-results").innerHTML = "";
+  lastLinks = null;
+  await refresh();
+  // Every loaded song re-reads its exits inside the new set, except the one
+  // playing when it is not in it: its old exits lead it into the new set
+  // through a real transition (an empty list would loop it forever).
+  const cur = player.cur?.track;
+  const outside = cur && !metas.some((m) => m.id === cur.id);
+  loader.refreshAll(outside ? cur.id : null);
+  player.prefetchedFor = null;
+  if (player.plan && !player.enabled(player.plan.tr.to)) player.cancelPlan();
+  viz.invalidate();
+  if (outside) {
+    if (cur.transitions.some((tr) => player.enabled(tr.to))) player.requestNextSong();
+    else {
+      const first = metas.find((m) => m.status === "ready" && m.enabled !== false);
+      if (first) await play(first.id);
+    }
+  }
+  renderExits();
+}
+
+// One box under the chips holds whatever the playlist row is asking: a name
+// (new, rename), a confirmation (delete), or the songs to pick. In the page's
+// own style, never the browser's prompt or confirm.
+const picker = $("#pl-picker");
+function closePicker() {
+  picker.innerHTML = "";
+  delete picker.dataset.mode;
+}
+
+function showPanel(mode, html) {
+  picker.dataset.mode = mode;
+  picker.innerHTML = html;
+}
+
+function askName(mode) {
+  const pl = openPlaylist();
+  if (mode === "rename" && !pl) return;
+  showPanel(mode, `<form class="pl-form">
+      <label class="label" for="pl-name">${mode === "new" ? "Tên playlist mới" : "Đổi tên playlist"}</label>
+      <div class="add__field">
+        <input id="pl-name" type="text" maxlength="80" autocomplete="off" enterkeyhint="done" placeholder="Ví dụ: Đêm chill" value="${mode === "rename" ? esc(pl.name) : ""}">
+        <button type="submit">${mode === "new" ? "Tạo" : "Lưu"}</button>
+      </div>
+      <p class="pl-err" role="alert"></p>
+    </form>
+    <div class="pick-foot"><button type="button" class="quiet" data-pick="close">Huỷ</button></div>`);
+  const input = $("#pl-name");
+  input.focus();
+  input.select();
+}
+
+function askDrop() {
+  const pl = openPlaylist();
+  if (!pl) return;
+  showPanel("drop", `<div class="msg">Xoá playlist <strong>${esc(pl.name)}</strong>? Các bài vẫn còn trong thư viện.</div>
+    <div class="pick-foot"><button type="button" class="danger" data-pick="drop">Xoá playlist</button><button type="button" class="quiet" data-pick="close">Huỷ</button></div>`);
+  picker.querySelector('[data-pick="drop"]').focus();
+}
+
+picker.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const mode = picker.dataset.mode;
+  const name = $("#pl-name").value.trim();
+  const btn = picker.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  try {
+    if (mode === "new") {
+      const p = await api.createPlaylist(name);
+      pls.lists.push(p);
+      await switchPlaylist(p.id);
+      if (pls.all) openPicker();
+    } else {
+      if (name) await api.renamePlaylist(session.playlist, name);
+      closePicker();
+      await loadPlaylists();
+    }
+  } catch (err) {
+    btn.disabled = false;
+    picker.querySelector(".pl-err").textContent = `${mode === "new" ? "Không tạo được" : "Không đổi tên được"}: ${err.message}`;
+  }
+});
+
+picker.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closePicker();
+});
+
+// "Thêm từ thư viện": the songs of the store not in the open playlist, to tick.
+async function openPicker() {
+  if (!session.playlist) return;
+  showPanel("pick", `<div class="msg">Đang mở thư viện…</div>`);
+  let all;
+  try {
+    all = (await api.storeTracks()).tracks;
+  } catch (err) {
+    picker.innerHTML = `<div class="msg">Không mở được thư viện: ${esc(err.message)}</div>`;
+    return;
+  }
+  const have = new Set(metas.map((m) => m.id));
+  const rest = all.filter((m) => !have.has(m.id) && m.status !== "error").reverse();
+  const close = `<button type="button" class="quiet" data-pick="close">Đóng</button>`;
+  if (!rest.length) {
+    picker.innerHTML = `<div class="msg">Mọi bài trong thư viện đã có trong playlist này.</div><div class="pick-foot">${close}</div>`;
+    return;
+  }
+  const row = (m) => {
+    const song = songOf(m);
+    const info = m.status === "ready" ? `${m.bpm ? m.bpm.toFixed(0) : "?"} BPM · ${esc(m.camelot || "")}` : "đang phân tích";
+    return `<label class="pick"><input type="checkbox" value="${esc(m.id)}"><span><span class="t">${esc(song.title)}</span><span class="s">${song.artist ? `${esc(song.artist)} · ` : ""}${info}</span></span></label>`;
+  };
+  picker.innerHTML = `<div class="pick-list">${rest.map(row).join("")}</div>
+    <div class="pick-foot"><button type="button" data-pick="add" disabled>Thêm vào playlist</button>${close}</div>`;
+}
+
+picker.addEventListener("change", () => {
+  const n = picker.querySelectorAll("input:checked").length;
+  const add = picker.querySelector('[data-pick="add"]');
+  if (!add) return;
+  add.disabled = !n;
+  add.textContent = n ? `Thêm ${n} bài vào playlist` : "Thêm vào playlist";
+});
+
+picker.addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-pick]");
+  if (!btn) return;
+  if (btn.dataset.pick === "close") return closePicker();
+  if (btn.dataset.pick === "drop") {
+    const pid = session.playlist;
+    btn.disabled = true;
+    await api.deletePlaylist(pid).catch(() => {});
+    pls.lists = pls.lists.filter((p) => p.id !== pid);
+    await switchPlaylist(null);
+    return loadPlaylists();
+  }
+  const ids = [...picker.querySelectorAll("input:checked")].map((i) => i.value);
+  btn.disabled = true;
+  try {
+    await api.restore(ids);
+    closePicker();
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = `Không thêm được: ${err.message}`;
+  }
+  await refresh();
+  schedulePoll();
+});
+
+$("#playlists").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button");
+  if (!btn || btn.closest("#pl-picker")) return;
+  if ("pl" in btn.dataset) return switchPlaylist(btn.dataset.pl || null);
+  const act = btn.dataset.act;
+  if (!act) return;
+  // The same button again closes what it opened.
+  if (picker.dataset.mode === act) return closePicker();
+  if (act === "new" || act === "rename") askName(act);
+  else if (act === "pick") openPicker();
+  else if (act === "drop") askDrop();
+});
 
 // --------------------------------------------------------------- add / search
 
@@ -812,6 +1074,11 @@ ready().then(() => {
     $("#add-hint").textContent = "Mỗi lần mở trang là một thư viện mới. Bài ai đó đã thêm trước sẽ vào ngay, không phải chờ phân tích.";
     $("#btn-relink").hidden = true;
   }
+  if (!session.playlists && session.playlist) {
+    session.playlist = null;
+    refresh();
+  }
+  loadPlaylists();
   if (session.limits.upload_mb) $("#upload-limit").textContent = `, tối đa ${session.limits.upload_mb} MB`;
   renderLibrary();
   api.samples().then((s) => {
