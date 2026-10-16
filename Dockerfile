@@ -9,10 +9,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MASHLOOP_DATA=/app/data \
     MASHLOOP_JS_RUNTIME=node
 
-# Model Beat This! và Demucs được torch hub tải về $TORCH_HOME/hub. Đặt trong
-# volume data để container tạo mới (down/up, up --build) không phải tải lại.
-ENV TORCH_HOME=/app/data/torch
-
 WORKDIR /app
 
 # Cài đặt các gói hệ thống bắt buộc:
@@ -64,6 +60,13 @@ COPY web/ ./web/
 # Tạo thư mục lưu trữ dữ liệu (bài hát tải về, cache phân tích, model weights)
 RUN mkdir -p /app/data
 VOLUME ["/app/data"]
+
+# Model phân tích nằm trong volume data, để container tạo mới (down/up,
+# up --build) không phải tải lại: Beat This! qua torch hub ($TORCH_HOME/hub),
+# Demucs qua Hugging Face ($HF_HOME/hub). Đặt ở cuối file để đổi các biến này
+# không phải build lại các bước cài đặt phía trên.
+ENV TORCH_HOME=/app/data/torch \
+    HF_HOME=/app/data/huggingface
 
 EXPOSE 8765
 
