@@ -66,7 +66,8 @@ def wait_server(url, timeout=30):
 def main():
     from playwright.sync_api import sync_playwright
 
-    server = subprocess.Popen([str(ROOT / ".venv" / "Scripts" / "python.exe"), "-m", "loopbox.server", "--port", str(PORT)],
+    # The interpreter running this test (the venv's, on Windows or macOS/Linux).
+    server = subprocess.Popen([sys.executable, "-m", "loopbox.server", "--port", str(PORT)],
                               cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         wait_server(f"http://127.0.0.1:{PORT}/api/tracks")
